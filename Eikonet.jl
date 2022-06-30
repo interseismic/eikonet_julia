@@ -98,61 +98,62 @@ function build_linear_dataset(params, velmod::VelMod1D, n_train::Int, n_test::In
     y_train = reshape(v[1:n_train], 1, :)
     y_test = reshape(v[end-n_test+1:end], 1, :)
 
-    println(size(x_train), " ", size(x_test))
-
     train_data = DataLoader((x_train, y_train), batchsize=batch_size, shuffle=true)
     test_data = DataLoader((x_test, y_test), batchsize=batch_size, shuffle=true)
     
     return train_data, test_data
 end
 
-function FactoredEikonal(x, model, scaler)
-    # x_recon = StatsBase.reconstruct(scaler, x)
-    # x_src = x[1:3,:]
-    # x_rec = x[4:6,:]
+function FactoredEikonalPDE(x, model)
+    x_src = x[1:3,:]
+    x_rec = x[4:6,:]
 
-    # τ1 = model(x)
-    # τ0 = sum((x_rec - x_src).^2, dims=1)
-
-    # T = τ0 .* τ1
+    τ1 = model(x)
+    τ0 = sqrt.(sum((x_rec - x_src).^2, dims=1))
     
-    # f(x) = sum(model(x))
-    # ∇τ1 = gradient(f, x)[1]
-    # ∇τ1 = ∇τ1[4:6,:]
+    f(x) = sum(model(x))
+    ∇τ1 = gradient(f, x)[1]
+    ∇τ1 = ∇τ1[4:6,:]
 
-    # v1 = τ0.^2 .* sum(∇τ1.^2, dims=1)
-    # v2 = 2.0 .* τ1 .* sum(relu.((x_rec .- x_src) .* ∇τ1), dims=1)
-    # v3 = τ1.^2
+    v1 = τ0.^2 .* sum(∇τ1.^2, dims=1)
+    v2 = 2.0 .* τ1 .* sum(relu.((x_rec .- x_src) .* ∇τ1), dims=1)
+    v3 = τ1.^2
     
-    #v̂ = (v1 .+ v2 .+ v3 .+ 1f-8) .^ (-0.5f0)
-
+    v̂ = (v1 .+ v2 .+ v3 .+ 1f-8) .^ (-0.5f0)
 end
 
-function FactoredEikonal(x, model)
-    f(x) = sum(solve(x, model))
-    grads = gradient(f, x)[1]
-    v̂ = (sum(grads[4:6,:] .^ 2, dims=1) .+ 1f-8) .^ (-0.5f0)
+function EikonalPDE(x, model)
+    τ0 = sqrt.(sum((x[4:6,:] - x[1:3,:]).^2, dims=1))
+
+    f(x) = sum(τ0 .* model(x))
+
+    ∇T = gradient(f, x)[1]
+    v̂ = (sum(∇T[4:6,:] .^ 2, dims=1) .+ 1f-8) .^ (-0.5f0)
     return v̂
 end
 
 function EikonalLoss(x, v, model)
-    v̂ = FactoredEikonal(x, model)
+    # v̂ = EikonalPDE(x, model)
+    v̂ = FactoredEikonalPDE(x, model)
     return sum(abs.(v̂ .- v) ./ v) / length(v)
 end
 
 function plot_solution(params, test_loader, model)
     x_test, v = test_loader.data
     scaler = data_scaler(params)
-    v̂ = FactoredEikonal(x_test, model)
-    scatter(x_test[6,:], v̂[1,:], label="v̂", left_margin = 20Plots.mm)
-    scatter!(x_test[6,:], v[1,:], label="v", left_margin = 20Plots.mm)
+    # v̂ = EikonalPDE(x_test, model)
+    v̂ = FactoredEikonalPDE(x_test, model)
+    x_trans = inverse(x_test, scaler)
+    scatter(x_trans[6,:]/1e3, v̂[1,:], label="v̂", left_margin = 20Plots.mm)
+    scatter!(x_trans[6,:]/1e3, v[1,:], label="v", left_margin = 20Plots.mm)
     ylims!((0.0, 10.0))
     savefig("test_v.pdf")
 
     x_test = zeros(Float32, 7, 100)
     x_test[4,:] = collect(range(0.0, 1.0, length=100))
     T̂ = solve(x_test, model, scaler)
-    scatter(x_test[4,:], T̂[1,:], label="T̂", left_margin = 20Plots.mm)
+    x_trans = inverse(x_test, scaler)
+    scatter(x_trans[4,:]/1e3, T̂[1,:], label="T̂", left_margin = 20Plots.mm)
     savefig("test_t.pdf")
 end
 
@@ -161,18 +162,13 @@ function solve(x, model)
     x_rec = x[4:6,:]
 
     τ1 = model(x)
-    τ0 = sum((x_rec - x_src).^2, dims=1)
+    τ0 = sqrt.(sum((x_rec - x_src).^2, dims=1))
     return τ0 .* τ1
 end
 
 function solve(x, model, scaler)
-    x_src = x[1:3,:]
-    x_rec = x[4:6,:]
-
-    τ1 = model(x)
-    τ0 = sum((x_rec - x_src).^2, dims=1)
-
-    return τ0 .* τ1 .* scaler.scale ./ 1f3
+    τ0 = sqrt.(sum((x[4:6,:] - x[1:3,:]).^2, dims=1))
+    return τ0 .* model(x) .* scaler.scale ./ 1f3
 end
 
 function initialize_velmod(params, ::Type{VelMod1D})
@@ -200,26 +196,29 @@ function train_eikonet!(loss, weights, train_loader, test_loader, opt)
 end
 
 function main(; kws...)
-    params = build_params()
+    params = build_eikonet_params()
 
     #println("CUDA found: ", CUDA.functional())
     velmod = initialize_velmod(params, VelMod1D)
 
-    train_loader, test_loader = build_linear_dataset(params, velmod, 8192*4, 1024, 128)
+    loss(x, v) = EikonalLoss(x, v, model)
     
     # Construct model
     model = build_model()
     weights = Flux.params(model)
     opt = ADAM(params["lr"])
 
-    scaler = data_scaler(params)
+    println("Compiling model...")
+    dummy_train, dummy_test = build_linear_dataset(params, velmod, 1, 1, 1)
+    println(loss(dummy_train.data[1], dummy_test.data[2]))
+    @time train_loss, test_loss = train_eikonet!(loss, weights,  dummy_train, dummy_test, opt)
+    println("Finished compiling.")
 
-    # Test to make sure EikonalLoss is working
-    println(EikonalLoss(test_loader.data[1], test_loader.data[2], model))
+    model = build_model()
+    weights = Flux.params(model)
+    train_loader, test_loader = build_linear_dataset(params, velmod, 8192*4, 1024, 128)
 
     plot_solution(params, test_loader, model)
-
-    loss(x, v) = EikonalLoss(x, v, model)
 
     for i in 1:params["n_epochs"]
         train_loss, test_loss = train_eikonet!(loss, weights, train_loader, test_loader, opt)

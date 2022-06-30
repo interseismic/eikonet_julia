@@ -1,4 +1,4 @@
-function build_params()
+function build_eikonet_params()
     params = Dict()
     params["phase_file"] = "/scratch/zross/oak_ridge/scsn_oak_ridge.csv"
     params["station_file"] = "/scratch/zross/oak_ridge/scsn_stations.csv"
@@ -12,6 +12,25 @@ function build_params()
     params["model_file"] = "/scratch/zross/oak_ridge/model.bson"
     params["n_epochs"] = 200
     params["lr"] = 1e-3
+    return params
+end
+
+function build_hyposvi_params()
+    params = Dict()
+    params["phase_file"] = "/scratch/zross/oak_ridge/scsn_oak_ridge.csv"
+    params["station_file"] = "/scratch/zross/oak_ridge/scsn_stations.csv"
+    params["velmod_file"] = "/scratch/zross/oak_ridge/vz_socal.csv"
+    params["catalog_outfile"] = "/scratch/zross/oak_ridge/catalog_svi.csv"
+    params["lon_min"] = -119.8640
+    params["lon_max"] = -117.8640
+    params["lat_min"] = 33.3580
+    params["lat_max"] = 35.3580
+    params["z_min"] = 0.0
+    params["z_max"] = 60.0
+    params["model_file"] = "/scratch/zross/oak_ridge/model.bson"
+    params["n_epochs"] = 500
+    params["lr"] = 1e-1
+    params["verbose"] = false
     return params
 end
 
@@ -41,19 +60,36 @@ struct MinmaxScaler
     scale::Float32
 end
 
-function fit(X::Array, ::Type{MinmaxScaler})
+function fit(X::AbstractArray, ::Type{MinmaxScaler})
     mins = minimum(X[1:6,:])
     maxs = maximum(X[1:6,:])
     return MinmaxScaler(mins, maxs-mins)
 end
 
-function forward!(X::Array, scaler::MinmaxScaler)
+function forward!(X::AbstractArray, scaler::MinmaxScaler)
     X[1:6,:] .= (X[1:6,:] .- scaler.min) ./ scaler.scale
 end
 
+function forward(X::AbstractArray, scaler::MinmaxScaler)
+    X_new = (X[1:6,:] .- scaler.min) ./ scaler.scale
+    return cat(X_new, reshape(X[7,:], 1, :), dims=1)
+end
 
-function inverse!(Y::Array, scaler::MinmaxScaler)
+function forward_point(X::AbstractArray, scaler::MinmaxScaler)
+    return (X .- scaler.min) ./ scaler.scale
+end
+
+function inverse_point(Y::AbstractArray, scaler::MinmaxScaler)
+    return (Y .* scaler.scale) .+ scaler.min
+end
+
+function inverse!(Y::AbstractArray, scaler::MinmaxScaler)
     Y[1:6,:] .= (Y[1:6,:] .* scaler.scale) .+ scaler.min
+end
+
+function inverse(Y::AbstractArray, scaler::MinmaxScaler)
+    Y_new = (Y[1:6,:] .* scaler.scale) .+ scaler.min
+    return cat(Y_new, reshape(Y[7,:], 1, :), dims=1)
 end
 
 function get_stations(params)
