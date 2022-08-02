@@ -167,7 +167,11 @@ function solve(x, model)
 end
 
 function solve(x, model, scaler)
-    τ0 = sqrt.(sum((x[4:6,:] - x[1:3,:]).^2, dims=1))
+    if ndims(x) == 2
+        τ0 = sqrt.(sum((x[4:6,:] - x[1:3,:]).^2, dims=1))
+    elseif ndims(x) == 3
+        τ0 = sqrt.(sum((x[4:6,:,:] - x[1:3,:,:]).^2, dims=1))
+    end
     return τ0 .* model(x) .* scaler.scale ./ 1f3
 end
 

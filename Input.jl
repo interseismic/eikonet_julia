@@ -29,8 +29,10 @@ function build_hyposvi_params()
     params["z_max"] = 60.0
     params["model_file"] = "/scratch/zross/oak_ridge/model.bson"
     params["n_epochs"] = 500
-    params["lr"] = 1e-1
+    params["n_particles"] = 20
+    params["lr"] = 1e-3
     params["verbose"] = false
+    params["inversion_method"] = "SVI"
     return params
 end
 
@@ -134,6 +136,5 @@ function data_scaler(params)
     x[7,2] = 1.0
 
     scaler = fit(x, MinmaxScaler)
-    #scaler = fit(UnitRangeTransform, x, dims=2)
     return scaler
 end
