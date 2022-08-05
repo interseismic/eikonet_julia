@@ -28,18 +28,18 @@ function build_hyposvi_params()
     params["z_min"] = 0.0
     params["z_max"] = 60.0
     params["model_file"] = "/scratch/zross/oak_ridge/model.bson"
-    params["n_epochs"] = 500
-    params["n_particles"] = 20
+    params["n_epochs"] = 1000
+    params["n_particles"] = 1
     params["lr"] = 1e-3
-    params["verbose"] = false
+    params["phase_unc"] = 0.20
+    params["verbose"] = true
+    params["k-NN"] = 500
+    params["iter_tol"] = 1f-2
+    params["max_k-NN_dist"] = 50
+    params["n_ssst_iter"] = 1
     params["inversion_method"] = "SVI"
     return params
 end
-
-# function fwd_transform(point::Geodesy.LLA, origin::Geodesy.LLA, scaler::UnitRangeTransform)
-#     enu = ENU(point, origin, wgs84) ./ 1f3
-#     return transform(scaler, [enu.e, enu.n, enu.u])
-# end
 
 function fwd_transform(point::Geodesy.LLA, origin::Geodesy.LLA)
     enu = ENU(point, origin, wgs84) ./ 1f3
