@@ -1,3 +1,23 @@
+using Dates
+
+function sec2date(s::AbstractFloat)
+    sec_sign = Int32(sign(s))
+    s = abs(s)
+    sec = Int32(floor(s))
+    msec = Int32(floor(1000*(s - sec)))
+    return Dates.Second(sec * sec_sign) + Dates.Millisecond(msec * sec_sign)
+end
+
+struct Origin
+    lat::Float32
+    lon::Float32
+    depth::Float32
+    time::Dates.DateTime
+    unc_z::Float32
+    X::Float32
+    Y::Float32
+end
+
 function build_eikonet_params()
     params = Dict()
     params["phase_file"] = "/scratch/zross/oak_ridge/scsn_oak_ridge.csv"
@@ -36,8 +56,35 @@ function build_hyposvi_params()
     params["k-NN"] = 500
     params["iter_tol"] = 1f-2
     params["max_k-NN_dist"] = 50
-    params["n_ssst_iter"] = 1
+    params["n_ssst_iter"] = 3
     params["inversion_method"] = "SVI"
+    return params
+end
+
+function build_supergamma_params()
+    params = Dict()
+    params["phase_file"] = "/scratch/zross/oak_ridge/scsn_oak_ridge.csv"
+    params["station_file"] = "/scratch/zross/oak_ridge/scsn_stations.csv"
+    params["velmod_file"] = "/scratch/zross/oak_ridge/vz_socal.csv"
+    params["catalog_outfile"] = "/scratch/zross/oak_ridge/catalog_svi.csv"
+    params["lon_min"] = -119.8640
+    params["lon_max"] = -117.8640
+    params["lat_min"] = 33.3580
+    params["lat_max"] = 35.3580
+    params["z_min"] = 0.0
+    params["z_max"] = 60.0
+    params["model_file"] = "/scratch/zross/oak_ridge/model.bson"
+    params["n_epochs"] = 1000
+    params["n_particles"] = 5
+    params["lr"] = 1e-3
+    params["phase_unc"] = 0.3
+    params["verbose"] = true
+    params["k-NN"] = 500
+    params["iter_tol"] = 1f-2
+    params["max_k-NN_dist"] = 50
+    params["n_ssst_iter"] = 1
+    params["n_det"] = 5
+    params["inversion_method"] = "EM"
     return params
 end
 
@@ -137,4 +184,29 @@ function data_scaler(params)
 
     scaler = fit(x, MinmaxScaler)
     return scaler
+end
+
+function timedelta(t1::DateTime, t2::DateTime)
+    # returns total seconds between t1,t2
+    (t1-t2) / Millisecond(1000)
+end
+
+function format_arrivals(phases::DataFrame, stations::DataFrame)
+    phase_sta = innerjoin(phases, stations, on = [:network, :station])
+    X_inp = zeros(Float32, size(phase_sta, 1), 4)
+    X_inp[:,1] .= phase_sta.X
+    X_inp[:,2] .= phase_sta.Y
+    X_inp[:,3] .= phase_sta.Z
+    arrival_times = DateTime.(phase_sta[!, "time"])
+    T_obs = zeros(Float32, 1, length(arrival_times))
+    for (i, row) in enumerate(eachrow(phase_sta))
+        if row.phase == "P"
+            X_inp[i,4] = 0
+        else
+            X_inp[i,4] = 1
+        end
+        T_obs[i] = timedelta(arrival_times[i], minimum(arrival_times))
+    end
+    T_ref = minimum(arrival_times)
+    return X_inp, T_obs, T_ref, phase_sta
 end

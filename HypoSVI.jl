@@ -19,28 +19,11 @@ using NearestNeighbors
 
 include("./Input.jl")
 include("./Eikonet.jl")
-
-struct Origin
-    lat::Float32
-    lon::Float32
-    depth::Float32
-    time::DateTime
-    unc_z::Float32
-    X::Float32
-    Y::Float32
-end
+include("./Adam.jl")
 
 abstract type InversionMethod end
 abstract type MAP <: InversionMethod end
 abstract type SVI <: InversionMethod end
-
-function sec2date(s::AbstractFloat)
-    sec_sign = Int32(sign(s))
-    s = abs(s)
-    sec = Int32(floor(s))
-    msec = Int32(floor(1000*(s - sec)))
-    return Dates.Second(sec * sec_sign) + Dates.Millisecond(msec * sec_sign)
-end
 
 function locate(params, X_inp, T_obs, eikonet, scaler, T_ref, ::Type{MAP})
     # Main function to locate events
@@ -148,38 +131,6 @@ function compute_kernel!(X::AbstractArray{Float32}, K::AbstractArray{Float32}, �
     end
 end
 
-mutable struct Adam
-    theta::AbstractArray{Float32} # Parameter array
-    m::AbstractArray{Float32}     # First moment
-    v::AbstractArray{Float32}     # Second moment
-    b1::Float32                   # Exp. decay first moment
-    b2::Float32                   # Exp. decay second moment
-    η::Float32                    # Step size
-    eps::Float32                  # Epsilon for stability
-    t::Int                        # Time step (iteration)
-end
-  
-# Outer constructor
-function Adam(theta::AbstractArray{Float32}, η=1e-3)
-    m   = zeros(Float32, size(theta))
-    v   = zeros(Float32, size(theta))
-    b1  = 0.9f0
-    b2  = 0.999f0
-    eps = 1e-8
-    t   = 0
-    Adam(theta, m, v, b1, b2, η, eps, t)
-end
-  
-function step!(opt::Adam, grads::AbstractArray{Float32})
-    opt.t += 1
-    gt    = grads
-    opt.m = opt.b1 .* opt.m + (1 - opt.b1) .* gt
-    opt.v = opt.b2 .* opt.v + (1 - opt.b2) .* gt .^ 2
-    mhat = opt.m ./ (1 - opt.b1^opt.t)
-    vhat = opt.v ./ (1 - opt.b2^opt.t)
-    opt.theta -= opt.η .* (mhat ./ (sqrt.(vhat) .+ opt.eps))
-end
-
 function compute_ϕ!(ϕ::AbstractArray{Float32}, ∇LL::AbstractArray{Float32}, K::AbstractArray{Float32}, ∇K::AbstractArray{Float32})
     N = size(K, 1)
     Nfloat = Float32(N)
@@ -196,7 +147,7 @@ end
 
 function get_origin_time(X::AbstractArray{Float32}, eikonet, scaler::MinmaxScaler,
                          T_obs::AbstractArray{Float32})
-    # Then determine origin time given hypocenter
+    # # Then determine origin time given hypocenter
     T_pred = Eikonet.solve(X, eikonet, scaler)
     T_pred = dropdims(T_pred, dims=1)
     T_obs = reshape(T_obs, :, 1)
@@ -232,7 +183,7 @@ function locate(params, X_inp::Array{Float32}, T_obs::Array{Float32}, eikonet, s
     ipairs = collect(combinations(collect(1:n_phase), 2))
     ipairs = permutedims(hcat(ipairs...))
     ΔT_obs = T_obs[ipairs[:,1]] - T_obs[ipairs[:,2]]
-    ΔT_obs /= params["phase_unc"]
+    ΔT_obs /= Float32(params["phase_unc"])
 
     X_inp = reshape(X_inp', 4, n_phase, 1)
     X_inp = repeat(X_inp, 1, 1, N)
@@ -255,7 +206,7 @@ function locate(params, X_inp::Array{Float32}, T_obs::Array{Float32}, eikonet, s
             T_pred = Eikonet.solve(X, eikonet, scaler)
             T_pred = dropdims(T_pred, dims=1)
             ΔT_pred = T_pred[ipairs[:,1],:] - T_pred[ipairs[:,2],:]
-            ΔT_pred /= params["phase_unc"]
+            ΔT_pred /= Float32(params["phase_unc"])
             loss = Flux.huber_loss(ΔT_pred, ΔT_obs, agg=sum)
             return loss
         end
@@ -323,31 +274,6 @@ function plot_particles()
     p3 = scatter(lats, -X[3,:]/1f3, xlabel="Latitude", ylabel="Depth")
     plot(p1, p2, p3, layout=(3,1))
     savefig("test.png")
-end
-
-function timedelta(t1::DateTime, t2::DateTime)
-    # returns total seconds between t1,t2
-    (t1-t2) / Millisecond(1000)
-end
-
-function prepare_event_data(phases::DataFrame, stations::DataFrame)
-    phase_sta = innerjoin(phases, stations, on = [:network, :station])
-    X_inp = zeros(Float32, size(phase_sta, 1), 4)
-    X_inp[:,1] .= phase_sta.X
-    X_inp[:,2] .= phase_sta.Y
-    X_inp[:,3] .= phase_sta.Z
-    arrival_times = DateTime.(phase_sta[!, "time"])
-    T_obs = zeros(Float32, 1, length(arrival_times))
-    for (i, row) in enumerate(eachrow(phase_sta))
-        if row.phase == "P"
-            X_inp[i,4] = 0
-        else
-            X_inp[i,4] = 1
-        end
-        T_obs[i] = timedelta(arrival_times[i], minimum(arrival_times))
-    end
-    T_ref = minimum(arrival_times)
-    return X_inp, T_obs, T_ref, phase_sta
 end
 
 function update!(ssst::DataFrame, origins::DataFrame, resid::DataFrame, params::Dict, max_dist)
@@ -419,15 +345,15 @@ function locate_events(pfile, outfile; phases=nothing)
     scaler = data_scaler(params)
 
     # Loop over events
-    origins = DataFrame(time=DateTime[], evid=Int[], lat=Float32[], lon=Float32[], depth=Float32[], z_unc=Float32[],
-                        X=Float32[], Y=Float32[])
+    origins = DataFrame(time=DateTime[], evid=Int[], lat=Float32[], lon=Float32[], depth=Float32[],
+                        z_unc=Float32[], X=Float32[], Y=Float32[])
     residuals = DataFrame(evid=Int[], network=String[], station=String[], phase=String[], residual=Float32[])
     for phase_sub in groupby(phases, :evid)
         # PRINT ALL PHASES TO THE SCREEN
         # if params["verbose"]
         #     println(phase_sub, "\n")
         # end
-        X_inp, T_obs, T_ref, phase_key = prepare_event_data(DataFrame(phase_sub), stations)
+        X_inp, T_obs, T_ref, phase_key = format_arrivals(DataFrame(phase_sub), stations)
         origin, resid = locate(params, X_inp, T_obs, model, scaler, T_ref, params["inversion_method"])
 
         push!(origins, (origin.time, phase_sub.evid[1], origin.lat, origin.lon, origin.depth,
