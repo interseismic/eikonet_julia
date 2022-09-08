@@ -318,15 +318,12 @@ function update!(ssst::DataFrame, origins::DataFrame, resid::DataFrame, params::
 end
 
 function plot_events(origins::DataFrame)
-    scatter(origins[!,:lon], origins[!,:lat], left_margin = 20Plots.mm)
-    origins = CSV.read("/scratch/zross/oak_ridge/scsn_cat.csv", DataFrame)
-    scatter!(origins[!,:lon], origins[!,:lat], left_margin = 20Plots.mm)
+    scatter(origins[!,:longitude], origins[!,:latitude], left_margin = 20Plots.mm)
     savefig("events.png")
 end
 
-function locate_events(pfile, outfile; phases=nothing)
-    # params = JSON.parsefile(pfile)
-    params = build_hyposvi_params()
+function locate_events(pfile; outfile=nothing, phases=nothing)
+    params = JSON.parsefile(pfile)
 
     if params["inversion_method"] isa String
         params["inversion_method"] = eval(Meta.parse(params["inversion_method"]))
@@ -335,24 +332,27 @@ function locate_events(pfile, outfile; phases=nothing)
     # Read in a pick file in csv format (e.g. from Gamma or PhaseLink)
     if isnothing(phases)
         phases = CSV.read(params["phase_file"], DataFrame)
+        unique!(phases)
     end
-    println(first(phases, 5), "\n")
+    if params["verbose"]
+        println(first(phases, 5), "\n")
+    end
 
     stations = get_stations(params)
-    println(first(stations, 5), "\n")
+    unique!(stations)
+    if params["verbose"]
+        println(first(stations, 5), "\n")
+    end
 
     model = BSON.load(params["model_file"], @__MODULE__)[:model]
     scaler = data_scaler(params)
 
     # Loop over events
-    origins = DataFrame(time=DateTime[], evid=Int[], lat=Float32[], lon=Float32[], depth=Float32[],
+    origins = DataFrame(time=DateTime[], evid=Int[], latitude=Float32[], longitude=Float32[], depth=Float32[],
                         z_unc=Float32[], X=Float32[], Y=Float32[])
     residuals = DataFrame(evid=Int[], network=String[], station=String[], phase=String[], residual=Float32[])
+
     for phase_sub in groupby(phases, :evid)
-        # PRINT ALL PHASES TO THE SCREEN
-        # if params["verbose"]
-        #     println(phase_sub, "\n")
-        # end
         X_inp, T_obs, T_ref, phase_key = format_arrivals(DataFrame(phase_sub), stations)
         origin, resid = locate(params, X_inp, T_obs, model, scaler, T_ref, params["inversion_method"])
 
@@ -367,10 +367,14 @@ function locate_events(pfile, outfile; phases=nothing)
     end
 
     if params["verbose"]
-        println(first(origins, 100))
+        println(first(origins, 10))
     end
-    CSV.write(outfile, origins)
-    plot_events(origins)
+    if isnothing(outfile)
+        CSV.write(params["catalog_outfile"], origins)
+    else
+        CSV.write(outfile, origins)
+    end
+    # plot_events(origins)
     return origins, residuals
 end
 
@@ -397,21 +401,22 @@ function init_ssst(phases::DataFrame)
     return ssst
 end
 
-function locate_events_ssst(pfile, outfile)
-    params = build_hyposvi_params()
+function locate_events_ssst(pfile)
+    params = JSON.parsefile(pfile)
+    outfile = params["catalog_outfile"]
 
     # Read in a pick file in csv format (e.g. from Gamma or PhaseLink)
     phases = CSV.read(params["phase_file"], DataFrame)
-    println(first(phases, 5), "\n")
+    unique!(phases)
 
     stations = get_stations(params)
-    println(first(stations, 5), "\n")
+    unique!(stations)
 
     ssst = init_ssst(phases)
     max_dist = params["max_k-NN_dist"]
     for k in 1:params["n_ssst_iter"]
-        origins, residuals = locate_events(pfile, "$(outfile)_$k", phases=phases)
-        println("Median SSST ", median(abs.(residuals.residual)))
+        origins, residuals = locate_events(pfile, outfile="$(outfile)_iter_$(k)", phases=phases)
+        println("Median SSST for iter $(k) ", median(abs.(residuals.residual)))
         update!(ssst, origins, residuals, params, max_dist)
         phases = CSV.read(params["phase_file"], DataFrame)
         update!(phases, ssst)

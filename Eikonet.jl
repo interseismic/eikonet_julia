@@ -29,12 +29,12 @@ end
 
 function build_model()
     return Chain(
-        Dense(7, 64, elu),
-        Dense(64, 64, elu),
-        Dense(64, 64, elu),
-        Dense(64, 64, elu),
-        Dense(64, 64, elu),
-        Dense(64, 1, abs),
+        Dense(7, 128, elu),
+        Dense(128, 128, elu),
+        Dense(128, 128, elu),
+        Dense(128, 128, elu),
+        Dense(128, 128, elu),
+        Dense(128, 1, abs),
     )
 end
 
@@ -123,11 +123,13 @@ function FactoredEikonalPDE(x, model)
 end
 
 function EikonalPDE(x, model)
-    τ0 = sqrt.(sum((x[4:6,:] - x[1:3,:]).^2, dims=1))
+    x_src = x[1:3,:]
+    x_rec = x[4:6,:]
+    τ0 = sqrt.(sum((x_rec - x_src).^2, dims=1))
 
     f(x) = sum(τ0 .* model(x))
-
     ∇T = gradient(f, x)[1]
+
     v̂ = (sum(∇T[4:6,:] .^ 2, dims=1) .+ 1f-8) .^ (-0.5f0)
     return v̂
 end
@@ -199,8 +201,9 @@ function train_eikonet!(loss, weights, train_loader, test_loader, opt)
     return mean(train_losses), mean(test_losses)
 end
 
-function main(; kws...)
-    params = build_eikonet_params()
+function main(pfile; kws...)
+    params = JSON.parsefile(pfile)
+    #params = build_eikonet_syn_params()
 
     #println("CUDA found: ", CUDA.functional())
     velmod = initialize_velmod(params, VelMod1D)
@@ -213,14 +216,16 @@ function main(; kws...)
     opt = ADAM(params["lr"])
 
     println("Compiling model...")
-    dummy_train, dummy_test = build_linear_dataset(params, velmod, 1, 1, 1)
-    println(loss(dummy_train.data[1], dummy_test.data[2]))
-    @time train_loss, test_loss = train_eikonet!(loss, weights,  dummy_train, dummy_test, opt)
+    dummy_train, dummy_test = build_linear_dataset(params, velmod, 2, 2, 2)
+    @time loss(dummy_train.data[1], dummy_test.data[2])
+    @time gradient(x->sum(model(x)), zeros(Float32, 7, 2))
+    @time gradient(x->loss(x,x), zeros(Float32, 7, 2))
+    #@time train_loss, test_loss = train_eikonet!(loss, weights,  dummy_train, dummy_test, opt)
     println("Finished compiling.")
 
     model = build_model()
     weights = Flux.params(model)
-    train_loader, test_loader = build_linear_dataset(params, velmod, 8192*4, 1024, 128)
+    train_loader, test_loader = build_linear_dataset(params, velmod, 8192*8, 1024, 128)
 
     plot_solution(params, test_loader, model)
 

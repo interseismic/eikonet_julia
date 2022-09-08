@@ -1,4 +1,63 @@
 using Dates
+using JSON
+
+function convert_gamma_to_hyposvi(fname, outfile)
+    picks = CSV.read(fname, DataFrame)
+    nets = []
+    stas = []
+    chans = []
+    evids = []
+    for row in eachrow(picks)
+        push!(evids, row.event_index)
+        net, sta, loc, chan = split(row.station_id, ".")
+        push!(nets, net)
+        push!(stas, sta)
+    end
+    phases = DataFrame(evid=evids, network=nets, station=stas, phase=picks[:,:phase_type], time=picks[:,:phase_time])
+    unique!(phases)
+    filter!(row -> row.evid >= 0.0, phases)
+    unique!(phases, [:evid, :network, :station, :phase])
+    CSV.write(outfile, phases)
+end
+
+function read_syn_dataset(params)
+    sta_dict = JSON.parsefile("synthetic_stations.json")
+    stations = DataFrame(network=String[], station=String[], latitude=Float64[], longitude=Float64[], elevation=Float64[])
+    for key in keys(sta_dict)
+        net, sta, loc, chan = split(key, ".")
+        elev = sta_dict[key]["elevation(m)"]
+        lat = sta_dict[key]["latitude"]/1000.
+        lon = sta_dict[key]["longitude"]
+        push!(stations, (net, sta, lat, lon, elev))
+    end
+    events = CSV.read("synthetic_events.csv", DataFrame)
+    picks = CSV.read("synthetic_picks.csv", DataFrame)
+    nets = []
+    stas = []
+    chans = []
+    for row in eachrow(picks)
+        net, sta, loc, chan = split(row.station_id, ".")
+        push!(nets, net)
+        push!(stas, sta)
+    end
+    phases = DataFrame(network=nets, station=stas, phase=picks[:,:phase_type], time=picks[:,:phase_time])
+    
+    origin = LLA(lat=params["lat_min"], lon=params["lon_min"])
+    trans = ENUfromLLA(origin, wgs84)
+    X = Vector{Float32}()
+    Y = Vector{Float32}()
+    Z = Vector{Float32}()
+    for row in eachrow(stations)
+        xyz = trans(LLA(lat=row.latitude, lon=row.longitude))
+        push!(X, xyz.e)
+        push!(Y, xyz.n)
+        push!(Z, row.elevation*1000.0)
+    end
+    stations= hcat(stations, DataFrame(X=X, Y=Y, Z=Z))
+
+
+    return phases, stations, events
+end
 
 function sec2date(s::AbstractFloat)
     sec_sign = Int32(sign(s))
@@ -30,6 +89,23 @@ function build_eikonet_params()
     params["z_min"] = 0.0
     params["z_max"] = 60.0
     params["model_file"] = "/scratch/zross/oak_ridge/model.bson"
+    params["n_epochs"] = 200
+    params["lr"] = 1e-3
+    return params
+end
+
+function build_eikonet_syn_params()
+    params = Dict()
+    params["phase_file"] = "/scratch/zross/oak_ridge/scsn_oak_ridge.csv"
+    params["station_file"] = "/scratch/zross/oak_ridge/scsn_stations.csv"
+    params["velmod_file"] = "/scratch/zross/oak_ridge/vz_socal.csv"
+    params["lon_min"] = -119.8640
+    params["lon_max"] = -117.8640
+    params["lat_min"] = 33.3580
+    params["lat_max"] = 35.3580
+    params["z_min"] = 0.0
+    params["z_max"] = 60.0
+    params["model_file"] = "/home/zross/git/eikonet_julia/syntest/model.bson"
     params["n_epochs"] = 200
     params["lr"] = 1e-3
     return params
@@ -74,16 +150,42 @@ function build_supergamma_params()
     params["z_min"] = 0.0
     params["z_max"] = 60.0
     params["model_file"] = "/scratch/zross/oak_ridge/model.bson"
-    params["n_epochs"] = 1000
-    params["n_particles"] = 5
+    params["n_epochs"] = 500
+    params["n_particles"] = 10
     params["lr"] = 1e-3
-    params["phase_unc"] = 0.3
+    params["phase_unc"] = 0.5
     params["verbose"] = true
     params["k-NN"] = 500
     params["iter_tol"] = 1f-2
     params["max_k-NN_dist"] = 50
     params["n_ssst_iter"] = 1
-    params["n_det"] = 5
+    params["n_det"] = 4
+    params["inversion_method"] = "EM"
+    return params
+end
+
+function build_supergamma_syn_params()
+    params = Dict()
+    params["phase_file"] = "/scratch/zross/oak_ridge/scsn_oak_ridge.csv"
+    params["station_file"] = "/scratch/zross/oak_ridge/scsn_stations.csv"
+    params["velmod_file"] = "/scratch/zross/oak_ridge/vz_socal.csv"
+    params["catalog_outfile"] = "/scratch/zross/oak_ridge/catalog_svi.csv"
+    params["lon_min"] = -118.004
+    params["lon_max"] = -117.004
+    params["lat_min"] = 35.205
+    params["lat_max"] = 36.205
+    params["z_min"] = 0.0
+    params["z_max"] = 60.0
+    params["model_file"] = "/home/zross/git/eikonet_julia/syntest/model.bson"
+    params["n_epochs"] = 100
+    params["n_particles"] = 10
+    params["lr"] = 1e-2
+    params["phase_unc"] = 0.05
+    params["verbose"] = true
+    params["k-NN"] = 500
+    params["iter_tol"] = 0.1
+    params["n_det"] = 8
+    params["n_warmup_iter"] = 20
     params["inversion_method"] = "EM"
     return params
 end
@@ -155,7 +257,7 @@ function get_stations(params)
         push!(Y, xyz.n)
         push!(Z, row.elevation*1000.0)
     end
-    return hcat(stations, DataFrame(X=X, Y=Y, Z=Z))
+    return unique(hcat(stations, DataFrame(X=X, Y=Y, Z=Z)), [:network, :station])
 end
 
 function data_scaler(params)
