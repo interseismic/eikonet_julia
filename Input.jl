@@ -33,11 +33,11 @@ function convert_gamma_to_hyposvi(fname, outfile)
     evids = []
     for row in eachrow(picks)
         push!(evids, row.event_index)
-        net, sta, loc, chan = split(row.station_id, ".")
+        net, sta, loc, chan = split(row.id, ".")
         push!(nets, net)
         push!(stas, sta)
     end
-    phases = DataFrame(evid=evids, network=nets, station=stas, phase=picks[:,:phase_type], time=picks[:,:phase_time])
+    phases = DataFrame(evid=evids, network=nets, station=stas, phase=picks[:,:type], time=picks[:,:timestamp])
     unique!(phases)
     filter!(row -> row.evid >= 0.0, phases)
     unique!(phases, [:evid, :network, :station, :phase])
