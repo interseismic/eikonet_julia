@@ -229,21 +229,24 @@ function get_stations(params)
     stations = CSV.read(params["station_file"], DataFrame)
     origin = LLA(lat=params["lat_min"], lon=params["lon_min"])
     trans = ENUfromLLA(origin, wgs84)
+    scale = Float32(params["scale"])
     X = Vector{Float32}()
     Y = Vector{Float32}()
     Z = Vector{Float32}()
     idx = []
     count = 0
+
     for row in eachrow(stations)
         count += 1
         xyz = trans(LLA(lat=row.latitude, lon=row.longitude))
-        if (row.latitude < params["lat_min"]) || (row.latitude > params["lat_max"]) ||
-           (row.longitude < params["lon_min"]) || (row.longitude > params["lon_max"])
-            continue
-        end
-        push!(X, xyz.e)
-        push!(Y, xyz.n)
-        push!(Z, row.elevation*1000.0)
+        XX = xyz.e / scale / 1f3
+        YY = xyz.n / scale / 1f3
+        if (XX < 0) || (XX > 1) || (YY < 0) || (YY > 1)
+            println("Warning: $(row.network) $(row.station) is outside of computational bounds. $XX $YY")
+        end 
+        push!(X, XX)
+        push!(Y, YY)
+        push!(Z, row.depth / scale)
         push!(idx, count)
     end
     stations = stations[idx,:]
@@ -251,32 +254,21 @@ function get_stations(params)
 end
 
 function data_scaler(params)
-    x = zeros(Float32, 7, 2)
+    x = zeros(Float32, 7)
     min_lla = LLA(lat=params["lat_min"], lon=params["lon_min"])
-    max_lla = LLA(lat=params["lat_max"], lon=params["lon_max"])
-    origin = LLA(lat=params["lat_min"], lon=params["lon_min"])
-    trans = ENUfromLLA(origin, wgs84)
+    trans = ENUfromLLA(min_lla, wgs84)
     min_enu = trans(min_lla)
-    max_enu = trans(max_lla)
 
-    x[1,1] = min_enu.e
-    x[2,1] = min_enu.n
-    x[3,1] = params["z_min"] * 1f3
-    x[4,1] = min_enu.e
-    x[5,1] = min_enu.n
-    x[6,1] = params["z_min"] * 1f3
-    x[7,1] = 0f0
-
-    x[1,2] = max_enu.e
-    x[2,2] = max_enu.n
-    x[3,2] = params["z_max"] * 1f3
-    x[4,2] = max_enu.e
-    x[5,2] = max_enu.n
-    x[6,2] = params["z_max"] * 1f3
-    x[7,2] = 1f0
+    x[1] = min_enu.e
+    x[2] = min_enu.n
+    x[3] = params["z_min"] * 1f3
+    x[4] = min_enu.e
+    x[5] = min_enu.n
+    x[6] = params["z_min"] * 1f3
+    x[7] = 0f0
 
     x[1:6,:] ./= 1f3
-    scaler = fit(x, MinmaxScaler)
+    scaler = MinmaxScaler(vec(minimum(X[1:6,:], dims=2)), params["scale"])
     return scaler
 end
 

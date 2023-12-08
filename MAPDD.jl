@@ -6,8 +6,8 @@ using CSV
 using JSON
 using Zygote
 using Flux
+using JLD2
 using Geodesy
-using BSON
 using Dates
 using StatsBase
 using Plots
@@ -23,6 +23,7 @@ using CUDA
 
 include("./Eikonet.jl")
 using .Eikonet
+include("./Input.jl")
 include("./Adam.jl")
 
 abstract type InversionMethod end
@@ -253,13 +254,13 @@ function locate(params, origins0, dtimes, stations, eikonet, scaler)
     X_init = copy(X_src)
     X_sta = gpu(X_sta)
 
-    likelihood_dist = Laplace(0f0, params["phase_unc"])
+    likelihood_dist = Normal(0f0, params["phase_unc"])
     # For prior, scale param is in meters
     priordist = Vector{Distribution}()
     push!(priordist, Normal(0f0, Float32(0.5)))
-    push!(priordist, Normal(0f0, Float32(500/scaler.scale)))
-    push!(priordist, Normal(0f0, Float32(500/scaler.scale)))
-    push!(priordist, Normal(0f0, Float32(500/scaler.scale)))
+    push!(priordist, Normal(0f0, Float32(50/scaler.scale)))
+    push!(priordist, Normal(0f0, Float32(50/scaler.scale)))
+    push!(priordist, Normal(0f0, Float32(50/scaler.scale)))
     likelihood_dist = gpu(likelihood_dist)
     priordist = gpu(priordist)
 
@@ -277,12 +278,12 @@ function locate(params, origins0, dtimes, stations, eikonet, scaler)
             X = cat(x1, x2, dims=3)
             T_pred = dropdims(eikonet(X[2:end,:,:]), dims=1) .+ X[1,:,:]
             ΔT_pred = T_pred[:,2] - T_pred[:,1]
-            return Flux.mae(ΔT_pred, ΔT_obs, agg = sum)
-            # return Flux.mse(ΔT_pred, ΔT_obs, agg = sum)
+            # return Flux.mae(ΔT_pred, ΔT_obs, agg = sum)
+            return Flux.mse(ΔT_pred, ΔT_obs, agg = sum)
             # return Flux.huber_loss(ΔT_pred, ΔT_obs, δ=Float32(1.35*params["phase_unc"]), agg = sum)
-            # logL = sum(logpdf.(likelihood_dist, ΔT_obs - ΔT_pred))
-            # logpx = sum([sum(logpdf.(priordist[i], X_src[i,:] - X_init[i,:])) for i in 1:4])
-            # return -logL #- logpx
+            # log_L = sum(logpdf.(likelihood_dist, ΔT_obs - ΔT_pred))
+            # log_px = sum([sum(logpdf.(priordist[i], X_src[i,:] - X_init[i,:])) for i in 1:4])
+            # return -log_L - log_px
         end
 
         L = 0f0
@@ -294,7 +295,6 @@ function locate(params, origins0, dtimes, stations, eikonet, scaler)
         end
 
         step!(opt, ∇L)
-        # CUDA.unsafe_free!(∇L)
         X_src = opt.theta
         println("Iter $i loss: $L ($runtime sec)")
     end
@@ -392,13 +392,16 @@ function syntheticdataset(pfile)
     #     println(nrow(stations), " stations in station file")
     # end
     # dtimes = innerjoin(dtimes, stations, on=[:network, :station])[:,names(dtimes)]
-    
-    model = BSON.load(params["model_file"], @__MODULE__)[:eikonet]
+
+    model_state = JLD2.load(params["model_file"], "model_state");
+    scaler = data_scaler(params)
+    model = EikoNet1D(build_model(), scaler.scale)
+    Flux.loadmodel!(model, model_state);
     # model = gpu(model)
 
     origins = DataFrame(evid=String[], latitude=Float32[], longitude=Float32[], depth=Float32[])
-    for (i, lon) in enumerate(range(-115.75, -115.65, length=100))
-        push!(origins, ("$i", 33.3, lon, 5.0))
+    for (i, lon) in enumerate(range(-117.5, -117.4, length=100))
+        push!(origins, ("$i", 35.8, lon, 5.0))
     end
     CSV.write("$(params["catalog_infile"])_true", origins)
 
@@ -484,7 +487,10 @@ end
 function run(pfile)
     params = JSON.parsefile(pfile)
  
-    model = BSON.load(params["model_file"], @__MODULE__)[:eikonet]
+    model_state = JLD2.load(params["model_file"], "model_state");
+    scaler = data_scaler(params)
+    model = EikoNet1D(build_model(), scaler.scale)
+    Flux.loadmodel!(model, model_state);
     model = gpu(model)
 
     origins0 = CSV.read(params["catalog_infile"], DataFrame, delim=",", types=Dict(:time=>DateTime, :evid=>String, :latitude=>Float32,
