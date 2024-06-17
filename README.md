@@ -31,7 +31,7 @@ If you use this module please cite the HypoSVI and Eikonet papers:
 include("Eikonet.jl")
 Eikonet.train("eikonet_hk77_interp.json")
 ```
-Generally speaking, you will want the test error for the Eikonet to be in the range of 1e-6, to ensure the solutions are sufficiently accurate numerically.
+Generally speaking, you will want the test error for the Eikonet to be in the range of 1e-6, to ensure the solutions are sufficiently accurate numerically. It is important for the velocity model to extend deep enough that ray paths are able to sample that part of the medium if necessary, or else the travel times for large distances may be inaccurate. For regional distances, this depth may need to be in the range of 50-100km 
 
 ### Locating earthquakes with HypoSVI
 Then you will need to exit and re-launch Julia in parallel with
