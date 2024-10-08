@@ -1,0 +1,15 @@
+{
+"velmod_file": "./velmod.csv",
+"lon_min": -117.5,
+"lat_min": 33.0,
+"z_min": -3.0,
+"z_max": 70.0,
+"scale": 200.0,
+"model_file": "./model.jld2",
+"batch_size": 64,
+"n_train": 1000000,
+"n_test": 100000,
+"n_epochs": 200,
+"lr": 1e-3
+}
+
