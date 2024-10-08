@@ -34,33 +34,26 @@ include("./SVIExtras.jl")
 abstract type InversionMethod end
 abstract type MAP <: InversionMethod end
 abstract type SVI <: InversionMethod end
-abstract type HMC <: InversionMethod end
 
 struct SVIParams <: SVI
     plot_π::Bool
     evid::Int
 end
 
-struct GridSearch <: InversionMethod end
-struct VI <: InversionMethod end
-
 struct MAPParams <: MAP end
 
-struct HMCParams <: HMC
-    plot_π::Bool
-    evid::Int
-end
-
 function init_eikonet(params)
+
     τ = Lux.Chain(
-        Dense(7, 16, Lux.elu),
+        CylindricalSymmetry(6+7, 3+1),
+        Dense(4, 16, Lux.elu),
+    	SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
+    	SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
+    	SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
         SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
         SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
         SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        Dense(16, 1))
+    	Dense(16, 1, Lux.relu))
 
     return EikoNet(τ, Float32(params["scale"]))
 end
@@ -151,32 +144,45 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
     prior_σ = Float32(params["prior_z_std"])/scale
     prior = PGeneralizedGaussian(prior_μ, prior_σ, params["prior_scale_param"])
 
-    # ipairs = collect(combinations(collect(1:size(X_obs, 2)), 2))
-    # ipairs = permutedims(hcat(ipairs...))
-    # ΔT_obs = T_obs[ipairs[:,1]] - T_obs[ipairs[:,2]]
-    # σ = sqrt.(σ[ipairs[:,1]].^2 + σ[ipairs[:,2]].^2)
+    weights = Float32.(map(x -> x <= 5f-1 ? 1.73 : 1, X_obs[4,:]))
+
+    # function ℓπ(θ::AbstractArray)
+    #     X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
+    #     T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
+    #     bias = mean(vec(T_obs) - T_pred)
+    #     log_L = -sum(abs.(T_obs .- T_pred))
+    #     # log_L = -sum(weights .* log_pdf.((T_obs .- T_pred .- bias) ./ σ))
+    #     if normed_ll
+    #         log_L /= length(T_obs)
+    #     end
+    #     log_p = -sum(logpdf.(prior, θ[3,:]))
+    #     return log_L + log_p
+    # end
+
+    ipairs = collect(combinations(collect(1:size(X_obs, 2)), 2))
+    ipairs = permutedims(hcat(ipairs...))
+    ΔT_obs = T_obs[ipairs[:,1]] - T_obs[ipairs[:,2]]
+    σ = sqrt.(σ[ipairs[:,1]].^2 + σ[ipairs[:,2]].^2)
 
     function ℓπ(θ::AbstractArray)
         X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
         T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
-        # ΔT_pred = T_pred[ipairs[:,1]] - T_pred[ipairs[:,2]]
-        bias = mean(vec(T_obs) - T_pred)
-        log_L = -sum(log_pdf.((T_obs .- T_pred .- bias) ./ σ))
+        ΔT_pred = T_pred[ipairs[:,1]] - T_pred[ipairs[:,2]]
+        log_L = -sum(log_pdf.((ΔT_obs - ΔT_pred) ./ σ))
         if normed_ll
-            log_L /= length(T_obs)
+            log_L /= length(ΔT_obs)
         end
-        # log_L = -sum(log_pdf.((ΔT_obs - ΔT_pred) ./ σ))
         log_p = -sum(logpdf.(prior, θ[3,:]))
         return log_L + log_p
     end
 
     options = Optim.Options(iterations=params["n_epochs"], g_tol=0f0, f_tol=0f0, x_tol=iter_tol, allow_f_increases=true)
-    result = optimize(ℓπ, θ̂, NewtonTrustRegion(), options, autodiff = :forward)
+    result = optimize(ℓπ, θ̂, BFGS(), options, autodiff = :forward)
     X_best = vec(Optim.minimizer(result))
 
-    if ~Optim.converged(result)
-        # println(result)
-    end
+    # if ~Optim.converged(result)
+    #     println(result)
+    # end
 
     X_in = cat(repeat(X_best, 1, size(X_obs, 2)), X_obs, dims=1)
     T_src, resid = get_origin_time(X_in, eikonet, T_obs, ps, st)
@@ -189,62 +195,6 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
     X_best = Float64.(X_best)
     X_lla = inv_trans(ENU(X_best[1], X_best[2]))
     X_src = Dict("longitude" => X_lla.lon, "latitude" => X_lla.lat, "depth" => X_best[3], "time" => sec2date(T_src))
-    if ~return_input
-        return X_src, resid
-    else
-        return X_src, resid, X_input
-    end
-end
-
-function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, ::GridSearch; return_input=false) where {T}
-
-    scale = Float32(params["scale"])
-    min_depth = Float32(params["z_min"] / scale)
-    max_depth = Float32(params["z_max"] / scale)
-    if params["prevent_airquakes"]
-        min_depth = 0f0
-    end
-    σ = map(x -> x <= 5f-1 ? Float32(params["pick_unc_p"]) : Float32(params["pick_unc_s"]), X_obs[4,:])
-    log_pdf = assign_likelihood(params)
-
-    prior_μ = Float32(params["prior_z_mean"])/scale
-    prior_σ = Float32(params["prior_z_std"])/scale
-    prior = PGeneralizedGaussian(prior_μ, prior_σ, params["prior_scale_param"])
-    
-    function ℓπ(θ::AbstractArray; print=false)
-        X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
-        T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
-        bias = mean(vec(T_obs) - T_pred)
-        log_L = -sum(log_pdf.((T_obs .- T_pred .- bias) ./ σ))
-        log_p = -sum(logpdf.(prior, θ[3,:]))
-        return log_L + log_p
-    end
-
-    best_loss = Inf32
-    X_best = nothing
-    for xx in range(0f0, 1f0, length=100)
-        for yy in range(0f0, 1f0, length=100)
-            for zz in range(min_depth, max_depth, length=20)
-                val = ℓπ([xx, yy, zz])
-                if val < best_loss
-                    X_best = [xx, yy, zz]
-                    best_loss = val
-                end
-            end
-        end
-    end
-
-    X_in = cat(repeat(X_best, 1, size(X_obs, 2)), X_obs, dims=1)
-    T_src, resid = get_origin_time(X_in, eikonet, T_obs, ps, st)
-
-    min_lla = LLA(lat=params["lat_min"], lon=params["lon_min"], alt=0.0)
-    trans = ENUfromLLA(min_lla, wgs84)
-    inv_trans = LLAfromENU(min_lla, wgs84)
-    X_input = copy(X_best)
-    X_best .*= 1f3 .* scale
-    X_best = Float64.(X_best)
-    X_ENU = inv_trans(ENU(X_best[1], X_best[2]))
-    X_src = Dict("longitude" => X_ENU.lon, "latitude" => X_ENU.lat, "depth" => X_best[3], "time" => sec2date(T_src))
     if ~return_input
         return X_src, resid
     else
@@ -388,100 +338,6 @@ function assign_likelihood(params)
     elseif lowercase.(params["likelihood_fn"]) == "huber"
         return x -> -huber_loss(x, 1f0)
     end
-end
-
-function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, ::VI) where {T}
-    # This version of the SVI functions does not use differential times.
-    # Note: the origin time is subtracted out beforehand
-
-    scale = Float32(params["scale"])
-    iter_tol = Float32(params["iter_tol"]) / scale
-    n_samp = params["n_particles"]
-    n_phase = size(X_obs, 2)
-    X_src, resid, X_input = locate(params, X_obs, T_obs, eikonet, ps, st, MAPParams(), return_input=true)
-
-    σ = map(x -> x <= 5f-1 ? Float32(params["pick_unc_p"]) : Float32(params["pick_unc_s"]), X_obs[4,:])
-    σ = repeat(σ, 1, n_samp)
-    X_obs = repeat(reshape(X_obs, 4, n_phase, 1), 1, 1, n_samp)
-
-    θ̂ = deepcopy(X_input)
-    log_std = log.(Float32.([1f0, 1f0, 1f0]) / scale)
-    θ̂ = [θ̂..., log_std...]
-
-    T_obs0 = reshape(T_obs, :, 1)
-    T_obs0 = repeat(T_obs0, 1, n_samp)
-
-    prior_zμ = Float32(params["prior_z_mean"]) / scale
-    prior_zσ = Float32(params["prior_z_std"]) / scale
-    prior_z = PGeneralizedGaussian(prior_zμ, prior_zσ, params["prior_scale_param"])
-    prior_xy = PGeneralizedGaussian(5f-1, 5f-1, params["prior_scale_param"])
-    likelihood_fn = Normal(0f0, 1f0)
-    
-    function KL(θ)
-        q_μ = θ[1:3]
-        log_std = θ[4:end]
-        q_σ = exp.(log_std) .+ 1f-5
-        hypo_sample = reparameterize(q_μ, log_std, n_samp)
-
-        X_in = cat(repeat(reshape(hypo_sample, 3, 1, n_samp), 1, n_phase, 1), X_obs, dims=1)
-        T_pred = eikonet(X_in, ps, st)[1,:,:]
-        T_bias = mean(T_obs0 - T_pred)
-        
-        likelihood = logpdf.(likelihood_fn, (T_obs0 - T_pred .- T_bias) ./ σ)
-        log_p_x = logpdf.(prior_xy, hypo_sample[1,:])
-        log_p_y = logpdf.(prior_xy, hypo_sample[2,:])
-        log_p_z = logpdf.(prior_z, hypo_sample[3,:])
-
-        likelihood = sum(likelihood, dims=1)
-        log_p = log_p_x + log_p_y + log_p_z
-        log_q = logpdf(MvNormal(q_μ, q_σ), hypo_sample)
-
-        # by taking the mean we approximate the expectation
-        return -sum(likelihood .+ log_p .- log_q) / n_samp
-    end
-
-    # println(θ̂)
-    # println(KL(θ̂))
-    # return
-    η = Float32(params["lr"])
-    state = Optimisers.setup(Optimisers.AdaGrad(η), θ̂)
-
-    # options = Optim.Options(iterations=params["n_epochs"], g_tol=0f0, f_tol=0f0, x_tol=iter_tol, allow_f_increases=true)
-    # result = optimize(KL, θ̂, Newton(), options, autodiff = :forward)
-    # println(result)
-    # result = Optim.minimizer(result)
-    # println(result)
-
-    for i in 1:params["n_epochs"]
-        ∇loss = ForwardDiff.gradient(KL, θ̂)
-        state, θ̂ = Optimisers.update(state, θ̂, ∇loss)
-        if norm(∇loss, Inf) <= iter_tol
-            if Int(params["svi_verbose"]) >= 1
-                println("Converged at epoch $i ", norm(∇loss, Inf))
-            end
-            break
-        end 
-
-        if (i == Int(params["n_epochs"])) && (Int(params["svi_verbose"]) >= 1 )
-            println("Failed to converge; ", norm(∇loss, Inf))
-        end
-
-        if Int(params["svi_verbose"]) == 2
-            println("Epoch $i ", norm(∇loss, Inf))
-        end
-    end 
-
-    # A reminder that you can't use second order methods with stochasticity (e.g. sampling from q)
-
-    # q_σ = result[4:end]
-    q_σ = θ̂[4:end]
-    σ = exp.(q_σ) .* scale
-
-    X_src["h_unc_min"] = σ[1]
-    X_src["h_unc_max"] = σ[2]
-    X_src["z_unc"] = σ[3]
-    return X_src, resid
-
 end
 
 function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, other_params::SVI; σ=nothing) where {T}
@@ -947,12 +803,6 @@ function locate_events(params, origins::DataFrame, phases::DataFrame, stations::
             method = MAPParams()
         elseif mode == "SVI"
             method = SVIParams(params["plot_svi_results"], phase_sub.evid[1])
-        elseif mode == "HMC"
-            method = HMCParams(params["plot_svi_results"], phase_sub.evid[1])
-        elseif mode == "GridSearch"
-            method = GridSearch()
-        elseif mode == "VI"
-            method = VI()
         end
         X_obs, T_obs, T_ref, phase_key = format_arrivals(params, DataFrame(phase_sub), stations)
         X_src, resid = locate(params, X_obs, T_obs, model, ps, st, method, σ=σ)
@@ -1061,8 +911,15 @@ function locate_events_ssst(pfile; stop=nothing, evid=nothing, showprogress=fals
         filter!(:evid => x -> x == evid, phases)
     end
 
+    phases_origins = prune_events(params, phases, origins)
+
     stations = get_stations(params)
     unique!(stations)
+    if ~("mag" in names(origins))
+        origins[!, :mag] .= NaN32
+        # magnitudes = zeros(Float32, nrow(origins))
+        # magnitudes .= NaN32
+    end
     magnitudes = origins[!,[:evid, :mag]]
 
     # Initial locations

@@ -1,28 +1,40 @@
 using Dates
 using JSON
 
-function hypoDDtoDataFrame(fname)
+function hypoDDtoDataFrame(fname_in, fname_out; station_file=nothing)
     println("Begin read lines")
-    lines = readlines(fname)
+    lines = readlines(fname_in)
     println("Done reading lines, building df")
     evid1 = nothing
     evid2 = nothing
-    dtimes = DataFrame(network=String[], station=String[], dt=Float32[], cc=Float32[], evid1=String[], evid2=String[], phase=String[])
+    if ~isnothing(station_file)
+        stations = stations = CSV.read(station_file, DataFrame)
+    end
+    networks = Dict()
+    for row in eachrow(stations)
+        networks[row.station] = row.network
+    end
+    dtimes = DataFrame(network=String[], station=String[], dt=Float32[], cc=Float32[], evid1=Int[], evid2=Int[], phase=String[])
     for line in lines
         strings = split(line)
         if strings[1] == "#"
-            evid1 = strings[2]
-            evid2 = strings[3]
+            evid1 = parse(Int, strings[2])
+            evid2 = parse(Int, strings[3])
         else
-            try
-                push!(dtimes, (strings[1], strings[2], parse(Float32, strings[3]), parse(Float32, strings[4]), evid1, evid2, strings[5]))
-            catch
-                println("ERROR: ", strings)
+            # try
+            if length(strings) == 4
+                push!(dtimes, (networks[strings[1]], strings[1], parse(Float32, strings[2]), parse(Float32, strings[3]), evid1, evid2, strings[4]))
+            else
+                push!(dtimes, (parse(Int, strings[1]), parse(Int, strings[2]), parse(Float32, strings[3]), parse(Float32, strings[4]), evid1, evid2, strings[5]))
             end
+            # catch
+            #     println("ERROR: ", strings)
+            #     return
+            # end
         end
     end
     println(first(dtimes, 10))
-    CSV.write("dtimes.csv", dtimes)
+    CSV.write(fname_out, dtimes)
 end
 
 function convert_gamma_to_hyposvi(fname, outfile)
@@ -243,6 +255,7 @@ function get_stations(params)
         YY = xyz.n / scale / 1f3
         if (XX < 0) || (XX > 1) || (YY < 0) || (YY > 1)
             println("Warning: $(row.network) $(row.station) is outside of computational bounds. $XX $YY")
+            continue
         end 
         push!(X, XX)
         push!(Y, YY)
@@ -289,6 +302,8 @@ function init_X(params::Dict, X_phase::Array{Float32})
         lat1 = rand(rng, Uniform(params["lat_min"], params["lat_max"]))
         lon1 = rand(rng, Uniform(params["lon_min"], params["lon_max"]))
         z1 = rand(rng, Uniform(params["z_min"], params["z_max"]))
+        origin = LLA(lat=params["lat_min"], lon=params["lon_min"])
+        trans = ENUfromLLA(origin, wgs84)
         point_enu = trans(LLA(lat=lat1, lon=lon1))
         X_src[1,:,i] .= point_enu.e
         X_src[2,:,i] .= point_enu.n
