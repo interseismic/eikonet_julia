@@ -10,8 +10,8 @@ using JLD2
 using Dates
 using StatsBase
 using StatsPlots
-using ForwardDiff
 using Zygote
+using ForwardDiff
 using Random
 using Optimisers
 using Combinatorics
@@ -21,11 +21,12 @@ using NearestNeighbors
 using Distributed
 using ProgressMeter
 using Optim
+# using Optimization
 using LineSearches
-using CovarianceEstimation
+# using CovarianceEstimation
 using Dates
 using KernelDensity
-using Turing
+# using Turing
 
 include("./Eikonet.jl")
 using .Eikonet
@@ -34,53 +35,26 @@ include("./SVIExtras.jl")
 abstract type InversionMethod end
 abstract type MAP <: InversionMethod end
 abstract type SVI <: InversionMethod end
-abstract type HMC <: InversionMethod end
 
 struct SVIParams <: SVI
     plot_π::Bool
     evid::Int
 end
 
-struct GridSearch <: InversionMethod end
-struct VI <: InversionMethod end
-
 struct MAPParams <: MAP end
 
-struct HMCParams <: HMC
-    plot_π::Bool
-    evid::Int
-end
-
-struct SGLD <: InversionMethod
-    plot_π::Bool
-    evid::Int
-end
-
-#function init_eikonet(params)
-#    τ = Lux.Chain(
-#        Dense(7, 16, Lux.elu),
-#        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-#        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-#        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-#        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-#        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-#        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-#        Dense(16, 1))
-#
-#    return EikoNet(τ, Float32(params["scale"]))
-#end
-
 function init_eikonet(params)
+
     τ = Lux.Chain(
         CylindricalSymmetry(6+7, 3+1),
         Dense(4, 16, Lux.elu),
+    	SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
+    	SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
+    	SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
         SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
         SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
         SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        SkipConnection(Chain(Dense(16, 32, Lux.elu), Dense(32, 16, Lux.elu)), +),
-        Dense(16, 1, Lux.relu))
+    	Dense(16, 1, Lux.relu))
 
     return EikoNet(τ, Float32(params["scale"]))
 end
@@ -142,6 +116,14 @@ function huber_loss(x::Real, δ::Float32)
     return ρ
 end
 
+function barron_loss(x::AbstractArray, c::Float32, α::Float32)
+    map(y->barron_loss(y, c, α), x)
+end
+
+function barron_loss(x::Real, c::Float32, α::Float32)
+    return abs(α - 2f0) * (((x/c)^2 / abs(α - 2f0) + 1f0)^(α/2f0) - 1f0) / α
+end
+
 function huber_loss(x::AbstractArray, δ::Float32)
     map(y->huber_loss(y, δ), x)
 end
@@ -167,19 +149,22 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
     end
     log_pdf = assign_likelihood(params)
 
-    prior_μ = Float32(params["prior_z_mean"])/scale
-    prior_σ = Float32(params["prior_z_std"])/scale
-    prior = PGeneralizedGaussian(prior_μ, prior_σ, params["prior_scale_param"])
+    prior = PGeneralizedGaussian(0f0, 1f0, params["prior_scale_param"])
+    prior_μ = Vector{Float32}([0.5, 0.5, params["prior_z_mean"] / scale])
+    prior_Σ = Vector{Float32}([0.5, 0.5, params["prior_z_std"] / scale])
+    weights = Float32.(map(x -> x <= 5f-1 ? 1.73 : 1, X_obs[4,:]))
+    max_src_rec_dist = Float32(params["max_src_rec_dist"]) / scale
 
     # function ℓπ(θ::AbstractArray)
     #     X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
     #     T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
     #     bias = mean(vec(T_obs) - T_pred)
+    #     distances = sqrt.((X_in[1,:]-X_in[4,:]).^2 + (X_in[2,:]-X_in[5,:]).^2 + (X_in[3,:]-X_in[6,:]).^2)
     #     log_L = -sum(log_pdf.((T_obs .- T_pred .- bias) ./ σ))
     #     if normed_ll
     #         log_L /= length(T_obs)
     #     end
-    #     log_p = -sum(logpdf.(prior, θ[3,:]))
+    #     log_p = -sum(logpdf.(prior, (θ - prior_μ) ./ prior_Σ))
     #     return log_L + log_p
     # end
 
@@ -196,17 +181,18 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
         if normed_ll
             log_L /= length(ΔT_obs)
         end
-        log_p = -sum(logpdf.(prior, θ[3,:]))
+        log_p = -sum(logpdf.(prior, (θ - prior_μ) ./ prior_Σ))
         return log_L + log_p
     end
 
-    options = Optim.Options(iterations=params["n_epochs"], g_tol=0f0, f_tol=0f0, x_tol=iter_tol, allow_f_increases=true)
+    options = Optim.Options(iterations=params["n_epochs"], g_tol=0f0, f_tol=0f0, x_tol=iter_tol, allow_f_increases=false)
+    # result = optimize(ℓπ, θ̂, BFGS(linesearch = LineSearches.BackTracking()), options, autodiff = :forward)
     result = optimize(ℓπ, θ̂, NewtonTrustRegion(), options, autodiff = :forward)
     X_best = vec(Optim.minimizer(result))
 
-    if ~Optim.converged(result)
-        # println(result)
-    end
+    # # if ~Optim.converged(result)
+    # #     println(result)
+    # # end
 
     X_in = cat(repeat(X_best, 1, size(X_obs, 2)), X_obs, dims=1)
     T_src, resid = get_origin_time(X_in, eikonet, T_obs, ps, st)
@@ -219,62 +205,6 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
     X_best = Float64.(X_best)
     X_lla = inv_trans(ENU(X_best[1], X_best[2]))
     X_src = Dict("longitude" => X_lla.lon, "latitude" => X_lla.lat, "depth" => X_best[3], "time" => sec2date(T_src))
-    if ~return_input
-        return X_src, resid
-    else
-        return X_src, resid, X_input
-    end
-end
-
-function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, ::GridSearch; return_input=false) where {T}
-
-    scale = Float32(params["scale"])
-    min_depth = Float32(params["z_min"] / scale)
-    max_depth = Float32(params["z_max"] / scale)
-    if params["prevent_airquakes"]
-        min_depth = 0f0
-    end
-    σ = map(x -> x <= 5f-1 ? Float32(params["pick_unc_p"]) : Float32(params["pick_unc_s"]), X_obs[4,:])
-    log_pdf = assign_likelihood(params)
-
-    prior_μ = Float32(params["prior_z_mean"])/scale
-    prior_σ = Float32(params["prior_z_std"])/scale
-    prior = PGeneralizedGaussian(prior_μ, prior_σ, params["prior_scale_param"])
-    
-    function ℓπ(θ::AbstractArray; print=false)
-        X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
-        T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
-        bias = mean(vec(T_obs) - T_pred)
-        log_L = -sum(log_pdf.((T_obs .- T_pred .- bias) ./ σ))
-        log_p = -sum(logpdf.(prior, θ[3,:]))
-        return log_L + log_p
-    end
-
-    best_loss = Inf32
-    X_best = nothing
-    for xx in range(0f0, 1f0, length=100)
-        for yy in range(0f0, 1f0, length=100)
-            for zz in range(min_depth, max_depth, length=20)
-                val = ℓπ([xx, yy, zz])
-                if val < best_loss
-                    X_best = [xx, yy, zz]
-                    best_loss = val
-                end
-            end
-        end
-    end
-
-    X_in = cat(repeat(X_best, 1, size(X_obs, 2)), X_obs, dims=1)
-    T_src, resid = get_origin_time(X_in, eikonet, T_obs, ps, st)
-
-    min_lla = LLA(lat=params["lat_min"], lon=params["lon_min"], alt=0.0)
-    trans = ENUfromLLA(min_lla, wgs84)
-    inv_trans = LLAfromENU(min_lla, wgs84)
-    X_input = copy(X_best)
-    X_best .*= 1f3 .* scale
-    X_best = Float64.(X_best)
-    X_ENU = inv_trans(ENU(X_best[1], X_best[2]))
-    X_src = Dict("longitude" => X_ENU.lon, "latitude" => X_ENU.lat, "depth" => X_best[3], "time" => sec2date(T_src))
     if ~return_input
         return X_src, resid
     else
@@ -376,28 +306,6 @@ function get_origin_time(X::AbstractArray{Float32}, eikonet::EikoNet, T_obs::Abs
     return origin_offset[i_best], resid[:,i_best] .- origin_offset[i_best]
 end
 
-function reparameterize(μ::AbstractArray, log_std::AbstractArray, n_samp)
-    σ = exp.(log_std) .+ 1f-5
-    ε = randn(Float32, 3, n_samp)
-    return μ .+ σ .* ε
-end
-
-function reparameterize(μ::AbstractArray, L::LowerTriangular, n_samp)
-    ε = randn(Float32, 3, n_samp)
-    return μ .+ L * ε
-end
-
-function clipped_mask(θ̂, min_depth, max_depth)
-    clipped_idx = (θ̂[1,:] .< 0f0) .|| (θ̂[1,:] .> 1f0) .||
-                  (θ̂[2,:] .< 0f0) .|| (θ̂[2,:] .> 1f0) .||
-                  (θ̂[3,:] .< min_depth) .|| (θ̂[3,:] .> max_depth)
-    N = size(θ̂, 2)
-    C = ones(Float32, N, N)
-    C[clipped_idx,:] .= 0f0
-    C[:,clipped_idx] .= 0f0
-    return C
-end
-
 function assign_kernel(params)
     if ~haskey(params, "kernel_fn")
         return (x, h) -> RBF_kernel(x, h)
@@ -417,101 +325,9 @@ function assign_likelihood(params)
         return x -> logpdf(Normal(0f0, 1f0), x)
     elseif lowercase.(params["likelihood_fn"]) == "huber"
         return x -> -huber_loss(x, 1f0)
+    elseif lowercase.(params["likelihood_fn"]) == "barron"
+        return x -> -barron_loss(x, 1f0, Float32(params["barron_alpha"]))
     end
-end
-
-function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, ::VI) where {T}
-    # This version of the SVI functions does not use differential times.
-    # Note: the origin time is subtracted out beforehand
-
-    scale = Float32(params["scale"])
-    iter_tol = Float32(params["iter_tol"]) / scale
-    n_samp = params["n_particles"]
-    n_phase = size(X_obs, 2)
-    X_src, resid, X_input = locate(params, X_obs, T_obs, eikonet, ps, st, MAPParams(), return_input=true)
-
-    σ = map(x -> x <= 5f-1 ? Float32(params["pick_unc_p"]) : Float32(params["pick_unc_s"]), X_obs[4,:])
-    σ = repeat(σ, 1, n_samp)
-    X_obs = repeat(reshape(X_obs, 4, n_phase, 1), 1, 1, n_samp)
-
-    θ̂ = deepcopy(X_input)
-    log_std = log.(Float32.([1f0, 1f0, 1f0]) / scale)
-    θ̂ = [θ̂..., log_std...]
-
-    T_obs0 = reshape(T_obs, :, 1)
-    T_obs0 = repeat(T_obs0, 1, n_samp)
-
-    prior_zμ = Float32(params["prior_z_mean"]) / scale
-    prior_zσ = Float32(params["prior_z_std"]) / scale
-    prior_z = PGeneralizedGaussian(prior_zμ, prior_zσ, params["prior_scale_param"])
-    prior_xy = PGeneralizedGaussian(5f-1, 5f-1, params["prior_scale_param"])
-    likelihood_fn = Normal(0f0, 1f0)
-    
-    function KL(θ)
-        q_μ = θ[1:3]
-        log_std = θ[4:end]
-        q_σ = exp.(log_std) .+ 1f-5
-        hypo_sample = reparameterize(q_μ, log_std, n_samp)
-
-        X_in = cat(repeat(reshape(hypo_sample, 3, 1, n_samp), 1, n_phase, 1), X_obs, dims=1)
-        T_pred = eikonet(X_in, ps, st)[1,:,:]
-        T_bias = mean(T_obs0 - T_pred)
-        
-        likelihood = logpdf.(likelihood_fn, (T_obs0 - T_pred .- T_bias) ./ σ)
-        log_p_x = logpdf.(prior_xy, hypo_sample[1,:])
-        log_p_y = logpdf.(prior_xy, hypo_sample[2,:])
-        log_p_z = logpdf.(prior_z, hypo_sample[3,:])
-
-        likelihood = sum(likelihood, dims=1)
-        log_p = log_p_x + log_p_y + log_p_z
-        log_q = logpdf(MvNormal(q_μ, q_σ), hypo_sample)
-
-        # by taking the mean we approximate the expectation
-        return -sum(likelihood .+ log_p .- log_q) / n_samp
-    end
-
-    # println(θ̂)
-    # println(KL(θ̂))
-    # return
-    η = Float32(params["lr"])
-    state = Optimisers.setup(Optimisers.AdaGrad(η), θ̂)
-
-    # options = Optim.Options(iterations=params["n_epochs"], g_tol=0f0, f_tol=0f0, x_tol=iter_tol, allow_f_increases=true)
-    # result = optimize(KL, θ̂, Newton(), options, autodiff = :forward)
-    # println(result)
-    # result = Optim.minimizer(result)
-    # println(result)
-
-    for i in 1:params["n_epochs"]
-        ∇loss = ForwardDiff.gradient(KL, θ̂)
-        state, θ̂ = Optimisers.update(state, θ̂, ∇loss)
-        if norm(∇loss, Inf) <= iter_tol
-            if Int(params["svi_verbose"]) >= 1
-                println("Converged at epoch $i ", norm(∇loss, Inf))
-            end
-            break
-        end 
-
-        if (i == Int(params["n_epochs"])) && (Int(params["svi_verbose"]) >= 1 )
-            println("Failed to converge; ", norm(∇loss, Inf))
-        end
-
-        if Int(params["svi_verbose"]) == 2
-            println("Epoch $i ", norm(∇loss, Inf))
-        end
-    end 
-
-    # A reminder that you can't use second order methods with stochasticity (e.g. sampling from q)
-
-    # q_σ = result[4:end]
-    q_σ = θ̂[4:end]
-    σ = exp.(q_σ) .* scale
-
-    X_src["h_unc_min"] = σ[1]
-    X_src["h_unc_max"] = σ[2]
-    X_src["z_unc"] = σ[3]
-    return X_src, resid
-
 end
 
 function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, other_params::SVI; σ=nothing) where {T}
@@ -528,34 +344,59 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
 
     log_pdf = assign_likelihood(params)
 
-    prior_μ = Float32(params["prior_z_mean"])/scale
-    prior_σ = Float32(params["prior_z_std"])/scale
-    prior = PGeneralizedGaussian(prior_μ, prior_σ, params["prior_scale_param"])
+    prior = PGeneralizedGaussian(0f0, 1f0, params["prior_scale_param"])
+    prior_μ = Vector{Float32}([0.5, 0.5, params["prior_z_mean"] / scale])
+    prior_Σ = Vector{Float32}([0.5, 0.5, params["prior_z_std"] / scale])
 
     θ̂ = repeat(X_input, 1, 1, N)
-    θ̂ = θ̂ + rand(Float32, 3, 1, N) .* 1f0 / scale
-    # θ̂[3,:,:] .= Float32(params["prior_z_mean"])/scale
+    θ̂ = θ̂ + randn(Float32, 3, 1, N) .* 5f0 / scale
+    # θ̂ = zeros(Float32, 3, 1, N)
+    # θ̂[1:2,:,:] .= 5f-1
+    # θ̂ = zeros(Float32, 3, 1, N)
+    # θ̂ = repeat(prior_μ, 1, 1, N)
+    # θ̂[1:2,:,:] = θ̂[1:2,:,:] + randn(Float32, 2, 1, N) .* 5f0 / scale
 
     if isnothing(σ)
         σ = Float32.(map(x -> x <= 5f-1 ? Float32(params["pick_unc_p"]) : Float32(params["pick_unc_s"]), X_obs[4,:]))
     else
         σ = Float32.(map(x -> x <= 5f-1 ? σ[1] : σ[2], X_obs[4,:]))
     end
-    σ = repeat(σ, 1, N)
+
+    ipairs = collect(combinations(collect(1:size(X_obs, 2)), 2))
+    if length(ipairs) >= 500
+        ipairs = ipairs[1:500]
+    end
+    ipairs = permutedims(hcat(ipairs...))
 
     X_obs = repeat(reshape(X_obs, 4, M, 1), 1, 1, N)
     T_obs = repeat(reshape(T_obs, :, 1), 1, N)
 
     state = Optimisers.setup(Optimisers.Adam(η), θ̂)
     
+    # function ℓπ(θ::AbstractArray)
+    #     X_in = cat(repeat(θ, 1, M, 1), X_obs, dims=1)
+    #     T_pred = eikonet(X_in, ps, st)[1,:,:]
+    #     T_bias = mean(T_obs - T_pred)
+    #     log_L = sum(log_pdf.((T_obs - T_pred .- T_bias) ./ σ))
+    #     log_p = sum(logpdf.(prior, (θ .- prior_μ) ./ prior_Σ))
+    #     return log_L + log_p
+    # end
+
+    ΔT_obs = T_obs[ipairs[:,1],:] - T_obs[ipairs[:,2],:]
+    σ = sqrt.(σ[ipairs[:,1]].^2 + σ[ipairs[:,2]].^2)
+
     function ℓπ(θ::AbstractArray)
-        X_in = cat(repeat(θ, 1, M, 1), X_obs, dims=1)
-        T_pred = eikonet(X_in, ps, st)[1,:,:]
-        T_bias = mean(T_obs - T_pred)
-        log_L = sum(log_pdf.((T_obs - T_pred .- T_bias) ./ σ), dims=1)
-        log_p = logpdf.(prior, θ[3,:,:])
-        return sum(log_L + log_p)
+        X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
+        T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
+        ΔT_pred = T_pred[ipairs[:,1],:] - T_pred[ipairs[:,2],:]
+        # log_L = sum(log_pdf.((ΔT_obs - ΔT_pred) ./ σ))
+        ρ = (ΔT_obs - ΔT_pred) ./ σ
+        log_L = Float32(length(ΔT_obs)) * log(sum(exp.(-ρ.^2)))
+        log_p = sum(logpdf.(prior, (θ .- prior_μ) ./ prior_Σ))
+        return log_L + log_p
     end
+
+    σ = repeat(σ, 1, N)
 
     function ∇_stein_kernel(θ::AbstractArray)
         ∇ℓπ = Zygote.gradient(ℓπ, θ)[1][:,1,:]'
@@ -566,6 +407,33 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
         ϕ = Float32.(-1.0 .* reshape(ϕ, size(ϕ,1), 1, size(ϕ,2)))
         return ϕ
     end
+
+    # for i in 1:params["n_epochs"]
+    #     ∇ℓπ = Zygote.gradient(ℓπ, θ̂)[1]
+    #     state, θ̂_new = Optimisers.update(state, θ̂, -1f0 .* ∇ℓπ)
+    #     Δθ = θ̂_new - θ̂
+    #     θ̂ = θ̂_new
+
+    #     if (i % params["lr_decay_interval"]) == 0
+    #         η /= 1f1
+    #         Optimisers.adjust!(state, η)
+    #     end
+
+    #     if norm(Δθ, 2) <= iter_tol
+    #         if Int(params["svi_verbose"]) >= 1
+    #             println("Converged at epoch $i ", 1000 * scale * norm(Δθ, 2))
+    #         end
+    #         break
+    #     end 
+
+    #     if (i == Int(params["n_epochs"])) && (Int(params["svi_verbose"]) >= 1 )
+    #         println("Failed to converge; ", 1000 * scale * norm(Δθ, 2))
+    #     end
+
+    #     if Int(params["svi_verbose"]) == 2
+    #         println("MAP Epoch $i ", 1000 * scale * norm(Δθ, 2))
+    #     end
+    # end
 
     for i in 1:params["n_epochs"]
         ϕ = ∇_stein_kernel(θ̂)
@@ -578,28 +446,50 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
             Optimisers.adjust!(state, η)
         end
 
-        if norm(ϕ, Inf) <= iter_tol
+        if norm(Δθ, 2) <= iter_tol
             if Int(params["svi_verbose"]) >= 1
-                println("Converged at epoch $i ", norm(ϕ, Inf))
+                println("Converged at epoch $i ", 1000 * scale * norm(Δθ, 2))
             end
             break
         end 
 
         if (i == Int(params["n_epochs"])) && (Int(params["svi_verbose"]) >= 1 )
-            println("Failed to converge; ", norm(ϕ, Inf))
+            println("Failed to converge; ", 1000 * scale * norm(Δθ, 2))
         end
 
         if Int(params["svi_verbose"]) == 2
-            println("Epoch $i ", norm(ϕ, Inf))
+            println("SVI Epoch $i ", 1000 * scale * norm(Δθ, 2))
         end
     end
 
     # Convert X back to meters
-    X_best = θ̂ .* scale
-    X_best = dropdims(X_best, dims=2)
+    # X_best = θ̂ .* scale
+    X_best = dropdims(θ̂, dims=2)
+
+    kde_X = kde(X_best[1,:])#, (0f0, 1f0))
+    kde_Y = kde(X_best[2,:])#, (0f0, 1f0))
+    kde_Z = kde(X_best[3,:])#, (0f0, 1f0))
+
+    X_best = Vector{Float32}([kde_X.x[argmax(kde_X.density)], kde_Y.x[argmax(kde_Y.density)], kde_Z.x[argmax(kde_Z.density)]])
+    X_obs = X_obs[:,:,1]
+    T_obs = T_obs[:,1]
+
+    X_in = cat(repeat(X_best, 1, size(X_obs, 2)), X_obs, dims=1)
+    T_src, resid = get_origin_time(X_in, eikonet, T_obs, ps, st)
+
+    min_lla = LLA(lat=params["lat_min"], lon=params["lon_min"], alt=0.0)
+    trans = ENUfromLLA(min_lla, wgs84)
+    inv_trans = LLAfromENU(min_lla, wgs84)
+    X_input = copy(X_best)
+    X_best .*= 1f3 .* scale
+    X_best = Float64.(X_best)
+    X_lla = inv_trans(ENU(X_best[1], X_best[2]))
+    X_src = Dict("longitude" => X_lla.lon, "latitude" => X_lla.lat, "depth" => X_best[3], "time" => sec2date(T_src))
 
     # Gaussian approx of posterior uncertainty
-    X_cov = cov(BiweightMidcovariance(), X_best')
+    # X_cov = cov(BiweightMidcovariance(), X_best')
+    X_best = dropdims(θ̂ .* scale, dims=2)
+    X_cov = cov(X_best')
     z_unc = sqrt(X_cov[3,3])
     h_unc = sqrt.(eigvals(X_cov[1:2,1:2]))
     sort!(h_unc)
@@ -611,125 +501,7 @@ function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::
     X_src["h_unc_min"] = h_unc[1]
     X_src["h_unc_max"] = h_unc[2]
     X_src["z_unc"] = z_unc
-    return X_src, resid
-end
 
-function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, other_params::SGLD; σ=nothing) where {T}
-    # Stochastic Gradient Langevin Dynamics backend for computing the posterior
-    # This version uses differential times
-    # Note: the origin time is subtracted out beforehand
-    X_src, resid, X_input = locate(params, X_obs, T_obs, eikonet, ps, st, MAPParams(), return_input=true)
-
-    scale = Float32(params["scale"])
-    N = params["n_particles"]
-    η = Float32(params["lr"])
-    iter_tol = Float32(params["svi_iter_tol"])/scale
-
-    log_pdf = assign_likelihood(params)
-
-    prior_μ = Float32(params["prior_z_mean"])/scale
-    prior_σ = Float32(params["prior_z_std"])/scale
-    prior = PGeneralizedGaussian(prior_μ, prior_σ, params["prior_scale_param"])
-
-    θ̂ = X_input
-
-    if isnothing(σ)
-        σ = Float32.(map(x -> x <= 5f-1 ? Float32(params["pick_unc_p"]) : Float32(params["pick_unc_s"]), X_obs[4,:]))
-    else
-        σ = Float32.(map(x -> x <= 5f-1 ? σ[1] : σ[2], X_obs[4,:]))
-    end
-    
-    ipairs = collect(combinations(collect(1:size(X_obs, 2)), 2))
-    ipairs = permutedims(hcat(ipairs...))
-    ΔT_obs = T_obs[ipairs[:,1]] - T_obs[ipairs[:,2]]
-    σ = sqrt.(σ[ipairs[:,1]].^2 + σ[ipairs[:,2]].^2)
-
-    function ℓπ(θ::AbstractArray)
-        X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
-        T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
-        ΔT_pred = T_pred[ipairs[:,1]] - T_pred[ipairs[:,2]]
-        log_L = -sum(log_pdf.((ΔT_obs - ΔT_pred) ./ σ))
-        log_L /= length(ΔT_obs)
-        log_p = -sum(logpdf.(prior, θ[3,:]))
-        return log_L + log_p
-    end
-
-    θ_samples = zeros(Float32, params["n_epochs"], 3)
-    for i in 1:params["n_epochs"]
-        ∇ℓπ = Zygote.gradient(ℓπ, θ̂)[1][:,1,:]
-        θ̂ = θ̂ + η .* ∇ℓπ .+ sqrt(2f0 * η) .* randn(3)
-        θ_samples[i,:] .= θ̂
-    end
-
-    # Convert X back to meters
-    X_best = θ_samples .* scale
-
-    # Gaussian approx of posterior uncertainty
-    X_cov = cov(BiweightMidcovariance(), X_best')
-    z_unc = sqrt(X_cov[3,3])
-    h_unc = sqrt.(eigvals(X_cov[1:2,1:2]))
-    sort!(h_unc)
-
-    if other_params.plot_π
-        inv_trans = LLAfromENU(LLA(lat=params["lat_min"], lon=params["lon_min"]), wgs84)
-        plot_particles(params, X_best .* 1f3, inv_trans, other_params.evid)
-    end
-
-    X_src["h_unc_min"] = h_unc[1]
-    X_src["h_unc_max"] = h_unc[2]
-    X_src["z_unc"] = z_unc
-    return X_src, resid
-end
-
-function locate(params, X_obs::Array{T}, T_obs::Array{T}, eikonet::EikoNet, ps::NamedTuple, st::NamedTuple, other_params::HMC) where {T}
-    # This is a HMC backend for computing the posterior
-    # This version of the SVI functions does not use differential times.
-    # Note: the origin time is subtracted out beforehand
-    X_src, resid, X_input = locate(params, X_obs, T_obs, eikonet, ps, st, MAPParams(), return_input=true)
-    scale = Float32(params["scale"])
-    σ = map(x -> x <= 5f-1 ? Float32(params["pick_unc_p"]) : Float32(params["pick_unc_s"]), X_obs[4,:])
-
-    @model function Hypocenter(T_true::AbstractArray{Float64})
-        # Assumptions
-        X ~ Uniform(0.0, 1.0)
-        Y ~ Uniform(0.0, 1.0)
-        Z ~ Uniform(0.0, params["z_max"] / scale)
-        # σ ~ Uniform(0.05, 0.20)
-        θ = [X, Y, Z]
-        X_in = cat(repeat(θ, 1, size(X_obs, 2)), X_obs, dims=1)
-        T_pred = dropdims(eikonet(X_in, ps, st), dims=1)
-        T_bias = mean(T_true - T_pred)
-        for i in eachindex(T_true)
-            T_true[i] ~ Cauchy(T_pred[i] .+ T_bias, σ[i])
-        end
-        # T_true ~ MvNormal(T0 .+ T_pred, σ)
-    end
-    iterations = params["n_particles"]
-    Turing.setadbackend(:forwarddiff)
-    # println(optimize(Hypocenter(Float64.(T_obs)), Turing.MAP()))
-    chain = sample(Hypocenter(Float64.(T_obs)), NUTS(1000, 0.65), iterations, progress=true, verbose=false)
-    # advi = ADVI(10, 1000)
-    # q = vi(Hypocenter(Float64.(T_obs)), advi)
-
-    θ̂ = hcat(chain[:X].data, chain[:Y].data, chain[:Z].data)'
-
-    # Convert X back to meters
-    X_best = θ̂ .* scale
-
-    # Gaussian approx of posterior uncertainty
-    X_cov = cov(BiweightMidcovariance(), X_best')
-    z_unc = sqrt(X_cov[3,3])
-    h_unc = sqrt.(eigvals(X_cov[1:2,1:2]))
-    sort!(h_unc)
-
-    if other_params.plot_π
-        inv_trans = LLAfromENU(LLA(lat=params["lat_min"], lon=params["lon_min"]), wgs84)
-        plot_particles(params, X_best .* 1f3, inv_trans, other_params.evid)
-    end
-
-    X_src["h_unc_min"] = h_unc[1]
-    X_src["h_unc_max"] = h_unc[2]
-    X_src["z_unc"] = z_unc
     return X_src, resid
 end
 
@@ -821,13 +593,24 @@ function compute_ssst(params::Dict, ssst::DataFrame, origins::DataFrame, resid::
         end
 
         kdtree = KDTree(cat(gdf.X, gdf.Y, gdf.depth, dims=2)')
-        idx = inrange(kdtree, cat(gdf.X, gdf.Y, gdf.depth, dims=2)', max_dist, true)
-        for i in 1:length(idx)
-            if length(idx[i]) < kNN
-                continue
+
+        for (i, row) in enumerate(eachrow(gdf))
+            idx = inrange(kdtree, [row.X, row.Y, row.depth], max_dist)
+            idx = setdiff(idx, i)
+            if length(idx) < kNN
+                resid_origin[gdf.id[i], :residual] = 0f0
+            else
+                resid_origin[gdf.id[i], :residual] = median(gdf.residual[idx])
             end
-            resid_origin[gdf.id[i], :residual] = median(gdf.residual[idx[i][2:end]])
         end
+
+        # idx = inrange(kdtree, cat(gdf.X, gdf.Y, gdf.depth, dims=2)', max_dist)
+        # for i in 1:length(idx)
+        #     if length(idx[i]) < kNN
+        #         continue
+        #     end
+        #     resid_origin[gdf.id[i], :residual] = median(gdf.residual[idx[i][2:end]])
+        # end
     end
     select!(resid_origin, names(ssst))
     return resid_origin
@@ -1026,7 +809,7 @@ function init_origin_df()
 end
 
 function init_ssst_radius(params)
-    ssst_radius = logrange(Float32(params["min_k-NN_dist"]), Float32(params["max_k-NN_dist"]), params["n_ssst_iter"])
+    ssst_radius = logrange(Float32(params["min_ssst_radius"]), Float32(params["max_ssst_radius"]), params["n_ssst_iter"])
     ssst_radius = reverse(collect(ssst_radius))
     return ssst_radius
 end
@@ -1037,6 +820,9 @@ function locate_events(params, origins::DataFrame, phases::DataFrame, stations::
     model = init_eikonet(params)
     println("Begin HypoSVI")
 
+    if !("mag" in names(origins))
+        origins[!, "mag"] .= NaN
+    end
     results = @showprogress @distributed (append!) for phase_sub in groupby(phases, :evid)
     # results = []
     # for phase_sub in groupby(phases, :evid)
@@ -1044,14 +830,6 @@ function locate_events(params, origins::DataFrame, phases::DataFrame, stations::
             method = MAPParams()
         elseif mode == "SVI"
             method = SVIParams(params["plot_svi_results"], phase_sub.evid[1])
-        elseif mode == "HMC"
-            method = HMCParams(params["plot_svi_results"], phase_sub.evid[1])
-        elseif mode == "GridSearch"
-            method = GridSearch()
-        elseif mode == "VI"
-            method = VI()
-        elseif mode == "SGLD"
-            method = SGLD(params["plot_svi_results"], phase_sub.evid[1])
         end
         X_obs, T_obs, T_ref, phase_key = format_arrivals(params, DataFrame(phase_sub), stations)
         X_src, resid = locate(params, X_obs, T_obs, model, ps, st, method, σ=σ)
@@ -1160,8 +938,15 @@ function locate_events_ssst(pfile; stop=nothing, evid=nothing, showprogress=fals
         filter!(:evid => x -> x == evid, phases)
     end
 
+    phases_origins = prune_events(params, phases, origins)
+
     stations = get_stations(params)
     unique!(stations)
+    if ~("mag" in names(origins))
+        origins[!, :mag] .= NaN32
+        # magnitudes = zeros(Float32, nrow(origins))
+        # magnitudes .= NaN32
+    end
     magnitudes = origins[!,[:evid, :mag]]
 
     # Initial locations
@@ -1172,13 +957,15 @@ function locate_events_ssst(pfile; stop=nothing, evid=nothing, showprogress=fals
     println("MAD residual initial P: ", σ[1], " S: ", σ[2])
 
     # Remove duplicates and relocate
-    phases, origins = remove_duplicate_picks(params, phases, origins, residuals)
-    println("Removing duplicate picks and relocate with new estimate of σ")
-    origins, residuals = locate_events(params, origins, phases, stations, mode="MAP", outfile="$(outfile)_iter_b", showprogress=showprogress, σ=σ)
-    CSV.write("$(resid_file)_iter_b.csv", residuals)
-    origins = innerjoin(origins, magnitudes, on=:evid)
-    σ = estimate_σ_pick(params, residuals)
-    println("MAD residual initial P: ", σ[1], " S: ", σ[2])
+    # phases, origins = remove_outlier_picks(params, phases, origins, residuals, 5f-1)
+    # phases, origins = remove_duplicate_picks(params, phases, origins, residuals)
+
+    # println("Removing duplicate picks and relocate with new estimate of σ")
+    # origins, residuals = locate_events(params, origins, phases, stations, mode="MAP", outfile="$(outfile)_iter_b", showprogress=showprogress)
+    # CSV.write("$(resid_file)_iter_b.csv", residuals)
+    # origins = innerjoin(origins, magnitudes, on=:evid)
+    # σ = estimate_σ_pick(params, residuals)
+    # println("MAD residual initial P: ", σ[1], " S: ", σ[2])
 
     phases0 = deepcopy(phases)
     ssst = init_ssst(phases)
@@ -1190,7 +977,7 @@ function locate_events_ssst(pfile; stop=nothing, evid=nothing, showprogress=fals
         phases = apply_ssst(phases0, ssst)
         CSV.write("$(ssst_file)_iter_static.csv", ssst)
         CSV.write("$(resid_file)_iter_static.csv", residuals)
-        origins, residuals = locate_events(params, origins, phases, stations, mode="MAP", outfile="$(outfile)_iter_static", showprogress=showprogress, σ=σ)
+        origins, residuals = locate_events(params, origins, phases, stations, mode="MAP", outfile="$(outfile)_iter_static", showprogress=showprogress)
         origins = innerjoin(origins, magnitudes, on=:evid)
         σ = estimate_σ_pick(params, residuals)
         println("MAD residual after static correction $i P: ", σ[1], " S: ", σ[2])
@@ -1211,7 +998,7 @@ function locate_events_ssst(pfile; stop=nothing, evid=nothing, showprogress=fals
         phases = apply_ssst(phases0, ssst)
         CSV.write("$(ssst_file)_iter_$(k).csv", ssst)
         CSV.write("$(resid_file)_iter_$(k).csv", residuals)
-        origins, residuals = locate_events(params, origins, phases, stations, mode="MAP", outfile="$(outfile)_iter_$(k)", showprogress=showprogress, σ=σ)
+        origins, residuals = locate_events(params, origins, phases, stations, mode="MAP", outfile="$(outfile)_iter_$(k)", showprogress=showprogress)
         origins = innerjoin(origins, magnitudes, on=:evid)
         σ = estimate_σ_pick(params, residuals)
         println("MAD residual for ssst iter $(k) P: ", σ[1], " S: ", σ[2])
@@ -1221,7 +1008,7 @@ function locate_events_ssst(pfile; stop=nothing, evid=nothing, showprogress=fals
         new_ssst = compute_ssst(params, ssst, origins, residuals)
         ssst = update_ssst(new_ssst, ssst, origins)
         phases = apply_ssst(phases0, ssst)
-        origins, residuals = locate_events(params, origins, phases, stations, mode=svi_step, outfile="$(outfile)_svi", showprogress=showprogress, σ=σ)
+        origins, residuals = locate_events(params, origins, phases, stations, mode=svi_step, outfile="$(outfile)_svi", showprogress=showprogress)
     end
     return
 end

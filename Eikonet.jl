@@ -167,7 +167,8 @@ end
 
 function EikonalLoss(x::AbstractArray, s::AbstractArray, EikoNet::L, ps::NamedTuple, st::NamedTuple; reduce=true) where {L}
     ŝ = EikonalPDE(x, EikoNet, ps, st)
-    return mean(abs2, ŝ .- s)
+    return Float32(0.95) * sum(abs.(ŝ - s)) / sum(abs.(s)) + Float32(0.05) * sqrt(sum((ŝ - s).^2) / sum(s.^2))
+    # return mean(abs2, ŝ .- s)
 end
 
 function initialize_velmod(params, ::Type{VelMod1D})
@@ -218,25 +219,25 @@ function train(pfile; kws...)
 
     println("Begin training EikoNet")
     for epoch in 1:params["n_epochs"]
-        train_loss = 0f0
-        test_loss = 0f0
 
         train_loader, test_loader = build_1d_velmod(params, velmod, n_train, n_test, (params["batch_size"], 1024), dev)
 
         # Train the model
+        train_loss = []
         for (x, s) in train_loader
             loss, ∇_loss = withgradient(p -> EikonalLoss(x, s, model, p, st), ps)
             opt_state, ps = Optimisers.update(opt_state, ps, ∇_loss[1])
-            train_loss += loss * Int32(length(s))
+            push!(train_loss, loss)
         end
-        train_loss /= n_train
+        train_loss = mean(train_loss)
 
         # Validate the model
-        test_loss = 0f0
+        test_loss = []
         for (x, s) in test_loader
-            test_loss += EikonalLoss(x, s, model, ps, st) * Int32(length(s))
+            loss = EikonalLoss(x, s, model, ps, st)
+            push!(test_loss, loss)
         end
-        test_loss /= n_test
+        test_loss = mean(test_loss)
 
         if test_loss < loss_best
             @save params["model_file"] {compress = true} ps st model
@@ -245,10 +246,10 @@ function train(pfile; kws...)
         end
         println("Epoch $epoch train $train_loss test $test_loss best $loss_best")
 
-        if (epoch % 30) == 0
-            η /= 1f1
-            Optimisers.adjust!(opt_state, η)
-        end
+        # if (epoch % 30) == 0
+        #     η /= 1f1
+        #     Optimisers.adjust!(opt_state, η)
+        # end
     end
 
 end
